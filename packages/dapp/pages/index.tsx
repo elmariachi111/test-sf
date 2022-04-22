@@ -1,112 +1,109 @@
-import { Button, Container, Flex, Heading, Image, SimpleGrid, Text } from "@chakra-ui/react";
+import { Button, Container, Flex, FormControl, FormLabel, Heading, Input, Text } from "@chakra-ui/react";
+import { Contract, ethers } from "ethers";
 import type { NextPage } from "next";
 import Head from "next/head";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 import { Account } from "../components/Account";
 import { useWeb3 } from "../components/Web3Context";
-import { Token as TokenContract, Token__factory as TokenFactory}  from '@token/contracts';
-import {BigNumberish} from 'ethers'
-import { TransferEvent } from "@token/contracts/typechain/ERC721";
-
-interface TokenMetadataResponse {
-  id: BigNumberish,
-  metadata: {
-    name: string;
-    description: string;
-    image: string;
-  }
-}
+import { Framework, SuperToken } from "@superfluid-finance/sdk-core";
 
 const Home: NextPage = () => {
-  const [nextTokenId, setNextTokenId] = useState<string>();
-  const [contract, setContract] = useState<TokenContract>();
-  const [tokens, setTokens] = useState<TokenMetadataResponse[]>([]);
-  const { provider, signer, account } = useWeb3();
+  const [sf, setFramework] = useState<Framework>();
+  const [daiXContract, setDaiXContract] = useState<SuperToken>();
+  const [daiXBalance, setDaiXBalance] = useState<string>();
+
+  const { provider, signer, account,chainId } = useWeb3();
 
   useEffect(() => {
-    if (!signer) return;
+    if (!provider || !chainId) return;
+
     (async () => {
-      const tokenFactory = TokenFactory.connect(process.env.NEXT_PUBLIC_TOKEN_CONTRACT as string, signer);
-      const contract = tokenFactory.attach(process.env.NEXT_PUBLIC_TOKEN_CONTRACT as string);
-      setContract(contract);
+      const _sf = await Framework.create({
+        chainId,
+        provider,
+      });
+      const _daiXContract = await _sf.loadSuperToken("fDAIx");
+      setDaiXContract(_daiXContract);
+      setFramework(_sf);
     })();
-  }, [signer]);
+  }, [provider, chainId]);
   
   useEffect(() => {
-    if (!contract) return;
+    if (!daiXContract || !provider || !account) return;
     (async () => {
-      const nti = await contract.nextTokenId();
-      setNextTokenId(nti.toString())
-    })();
-  },[contract])
-
-  const fetchToken = async (contract: TokenContract, tokenId: string): Promise<TokenMetadataResponse> => {
-    const tokenUri = await contract.tokenURI(tokenId);
-    const metadata = await fetch(tokenUri, {
-      method: "GET",
-      headers: {
-        "Content-type": "application/json"
-      }
-    });
-    
-    return {
-      id: tokenId,
-      metadata: await metadata.json() 
-    };
-  }
-
-  const fetchTokens = useCallback(async (address: string): Promise<TokenMetadataResponse[]> => {
-    if (!contract) return [];
-      const _balance = await contract.balanceOf(address);
-      if (_balance.isZero()) return [];
-      const filter = contract.filters.Transfer(null, address);
-      const transfers = await contract.queryFilter(filter);
-      const promises = transfers.map((e) => {
-        return fetchToken(contract, e.args.tokenId.toString());
-      });
-      return Promise.all(promises);
       
-  },[contract]) 
+      const _bal = await daiXContract.balanceOf({
+        account,
+        providerOrSigner: provider
+      });
+      setDaiXBalance(_bal);
+    })();
+  }, [daiXContract, provider, account])
 
   useEffect(() => {
-    if (!contract || !account) return;
-    (async () => {
-      setTokens(await fetchTokens(account));
-    })(); 
-  },[contract, account, fetchTokens]);
+    if (!sf || !account) return;
+    (async() => {
+      const _streams = await sf.query.listStreams({sender: account });
+      console.log("STREAMS", _streams.data);
+    })();
+  }, [sf, account]);
 
-  const mint = useCallback(async () => {
-    if (!contract || !account) return;
+  const createStream = useCallback(async (from: string, to: string) => {
+    if (!sf || !signer || !daiXContract) return;
+    const flowRate = ethers.utils.parseUnits("0.0005").toString();
+    console.log(flowRate);
     
-    const tx = await contract.safeMint(account);
-    const receipt = await tx.wait();
-    const transferEvent: TransferEvent = receipt.events?.find((evt) => evt.event === "Transfer") as TransferEvent;
-    const tokenId = transferEvent.args.tokenId;
-    const newToken = await fetchToken(contract, tokenId.toString());
-    setTokens([...tokens, newToken]);
+    console.log(await signer.getAddress(),  flowRate);
+    const createFlowOperation = sf.cfaV1.createFlow({
+      flowRate, //DAI wei / s
+      receiver: to,
+      superToken: daiXContract.address
+      // userData?: string
+    });
 
-    const nti = await contract.nextTokenId();
-    setNextTokenId(nti.toString())
-  },[contract, tokens, setTokens, account])
+    const result = await createFlowOperation.exec(signer);
+    console.log(result);
+  }, [sf, signer, daiXContract]);
 
+  const onSubmit = (e: any) => {
+    e.preventDefault();
+    if (!account) throw "not possible";
+
+    const data = new FormData(e.target);
+    const values = Object.fromEntries(data.entries());
+    console.log({...values, from: account} );
+    createStream(account, values["to"] as string)
+    return false;
+  } 
+  // acc2 0x0dbc08Db1e5E8B17234852fb76e2fB8043B24589
+  
   return (
     <Container maxW="container.xl" p="2" h="100vh" as={Flex} direction="column">
       <Head>
-        <title>tokens</title>
+        <title>superfluid tokens</title>
       </Head>
       <Flex justify="space-between" align="center" my={12}>
         <Heading>tokens</Heading>
         <Account />
       </Flex>
-      <SimpleGrid columns={[1, 2, 3, 4]} spacing={10}>
-        {tokens.map((t) => (
-          <Flex key={t.id.toString()} direction="column" align="center" p={3}>
-            <Image src={t.metadata.image} alt={t.metadata.description}/>
-            <Text fontSize="xl">{t.metadata.name}</Text>
-          </Flex>
-        ))}
-      </SimpleGrid>
-      <Button onClick={mint} disabled={!nextTokenId}>mint {nextTokenId}</Button>
+
+      <Flex my={12} gridGap={5}>
+        <Text>DAIx Balance</Text>
+        <Text>{daiXBalance}</Text>
+      </Flex>
+
+      <form onSubmit={onSubmit}>
+        <Flex direction="column">
+          <Text>From: {account}</Text>
+        <Flex direction="row">
+          <FormControl >
+            <Input name="to" type="text" placeholder="recipient"></Input>
+            
+          </FormControl>
+          <Button type="submit">start stream</Button>
+        </Flex>
+        </Flex>
+      </form>
     </Container>
   );
 };
